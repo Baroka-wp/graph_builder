@@ -14,6 +14,8 @@ import ApiNode from './ApiNode';
 import OpenAINode from './OpenAINode';
 import { neumorphicStyle } from './styles';
 import { TailSpin } from 'react-loader-spinner'; // Importing the loader
+import OpenAI from 'openai';
+
 
 const nodeTypes = {
     textInput: TextInputNode,
@@ -32,24 +34,73 @@ const initialNodes = [
 ];
 
 function Flow() {
+    const openai = new OpenAI({ apiKey: process.env.REACT_APP_OPENAI_API_KEY, dangerouslyAllowBrowser: true });
+
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
     const [contextMenu, setContextMenu] = useState(null);
     const [chatMessages, setChatMessages] = useState([]);
-    const [currentNodeId, setCurrentNodeId] = useState('start');
+    const [currentNodeId, setCurrentNodeId] = useState(null);
     const [userInput, setUserInput] = useState('');
     const [loading, setLoading] = useState(false); // Global loading state
     const reactFlowWrapper = useRef(null);
     const chatMessagesRef = useRef(null);
 
+    console.log(currentNodeId)
+
+    const updateNodeData = useCallback((id, key, value) => {
+        setNodes(nds => nds.map(node =>
+            node.id === id
+                ? { ...node, data: { ...node.data, [key]: value } }
+                : node
+        ));
+    }, []);
+
+    const getNextNode = useCallback((nodeId = currentNodeId) => {
+        const currentEdge = edges.find(edge => edge.source === nodeId);
+        if (currentEdge) {
+            return nodes.find(node => node.id === currentEdge.target);
+        }
+        return null;
+    }, [currentNodeId, edges, nodes]);
+
+
+    const initializeChat = useCallback(() => {
+        const startNode = nodes.find(node => node.type === 'startNode');
+        if (startNode) {
+            const firstNode = getNextNode(startNode.id);
+            if (firstNode) {
+                setCurrentNodeId(firstNode.id);
+                if (firstNode.type === 'textInput') {
+                    setChatMessages([{ type: 'agent', text: firstNode.data.label }]);
+                }
+            }
+        }
+    }, [nodes, getNextNode]);
+
     useEffect(() => {
         const savedNodes = localStorage.getItem('flowNodes');
         const savedEdges = localStorage.getItem('flowEdges');
         if (savedNodes && savedEdges) {
-            setNodes(JSON.parse(savedNodes));
+            const parsedNodes = JSON.parse(savedNodes).map(node => ({
+                ...node,
+                data: {
+                    ...node.data,
+                    onLabelChange: node.type === 'textInput'
+                        ? (newLabel) => updateNodeData(node.id, 'label', newLabel)
+                        : undefined,
+                    onPromptChange: node.type === 'openAINode'
+                        ? (newPrompt) => updateNodeData(node.id, 'prompt', newPrompt)
+                        : undefined,
+                    onModelChange: node.type === 'openAINode'
+                        ? (newModel) => updateNodeData(node.id, 'model', newModel)
+                        : undefined,
+                }
+            }));
+            setNodes(parsedNodes);
             setEdges(JSON.parse(savedEdges));
         }
-    }, [setNodes, setEdges]);
+    }, [setNodes, setEdges, updateNodeData]);
 
     useEffect(() => {
         if (nodes.length > 0) {
@@ -65,19 +116,21 @@ function Flow() {
 
     const onConnect = useCallback((params) => setEdges((eds) => addEdge(params, eds)), []);
 
-    const handleApiError = useCallback((error) => {
-        console.error("API Error:", error);
-        setChatMessages(prev => [...prev, { type: 'agent', text: "Sorry, there was an error processing your request." }]);
-        setLoading(false);
-    }, []);
-
-    const updateNodeData = useCallback((nodeId, field, value) => {
-        setNodes(nds => nds.map(node =>
-            node.id === nodeId
-                ? { ...node, data: { ...node.data, [field]: value } }
-                : node
-        ));
-    }, []);
+    const executeOpenAINode = async (nodeData, userMessage) => {
+        try {
+            const completion = await openai.chat.completions.create({
+                messages: [
+                    { role: "system", content: nodeData.prompt },
+                    { role: "user", content: userMessage }
+                ],
+                model: nodeData.model,
+            });
+            return completion.choices[0].message.content;
+        } catch (error) {
+            console.error("OpenAI API error:", error);
+            return "Error: Unable to get response from OpenAI.";
+        }
+    };
 
     const addNode = (type) => {
         const newNodeId = (nodes.length + 1).toString();
@@ -88,33 +141,17 @@ function Flow() {
                 x: Math.random() * (reactFlowWrapper.current.offsetWidth - 200),
                 y: Math.random() * (reactFlowWrapper.current.offsetHeight - 100)
             },
-            data: type === 'openAINode' ? {
-                prompt: '',
-                apiKey: process.env.REACT_APP_OPENAI_API_KEY,
-                model: 'gpt-3.5-turbo',
-                onPromptChange: (newPrompt) => updateNodeData(newNodeId, 'prompt', newPrompt),
-                onModelChange: (newModel) => updateNodeData(newNodeId, 'model', newModel),
-                onApiResponse: (response) => {
-                    setChatMessages(prev => [...prev, { type: 'agent', text: response }]);
-                    setLoading(false);
-                    const nextNode = getNextNode();
-                    if (nextNode) {
-                        setCurrentNodeId(nextNode.id);
-                        if (nextNode.type === 'openAINode') {
-                            updateNodeData(nextNode.id, 'userMessage', response);
-                            updateNodeData(nextNode.id, 'triggerExecution', true);
-                        } else {
-                            setChatMessages(prev => [...prev, { type: 'agent', text: nextNode.data.label }]);
-                        }
-                    }
-                },
-                setLoading: setLoading, // Assurez-vous que cette ligne est présente
-                setChatMessages: setChatMessages,
-                onApiError: handleApiError,
-            } : {
-                label: `New message ${nodes.length + 1}`,
-                onChange: (newLabel) => updateNodeData(newNodeId, 'label', newLabel),
-            }
+            data: type === 'openAINode'
+                ? {
+                    prompt: 'You are a helpful assistant.',
+                    model: 'gpt-4o',
+                    onPromptChange: (newPrompt) => updateNodeData(newNodeId, 'prompt', newPrompt),
+                    onModelChange: (newModel) => updateNodeData(newNodeId, 'model', newModel),
+                }
+                : {
+                    label: `New message ${nodes.length + 1}`,
+                    onLabelChange: (newLabel) => updateNodeData(newNodeId, 'label', newLabel),
+                }
         };
         setNodes((nds) => nds.concat(newNode));
     };
@@ -147,30 +184,31 @@ function Flow() {
         [nodes, currentNodeId, setNodes, setEdges]
     );
 
-    const getNextNode = useCallback(() => {
-        const currentEdge = edges.find(edge => edge.source === currentNodeId);
-        if (currentEdge) {
-            const nextNode = nodes.find(node => node.id === currentEdge.target);
-            return nextNode;
+    useEffect(() => {
+        if (nodes.length > 0 && chatMessages.length === 0) {
+            const firstNode = nodes[1];
+            setCurrentNodeId(firstNode.id);
+            if (firstNode.type === 'textInput') {
+                setChatMessages([{ type: 'agent', text: firstNode.data.label }]);
+            }
         }
-        return null;
-    }, [currentNodeId, edges, nodes]);
+    }, [nodes, chatMessages]);
 
-    const handleUserInput = () => {
+    const handleUserInput = async () => {
         if (userInput.trim() === '') return;
 
         setChatMessages(prev => [...prev, { type: 'user', text: userInput }]);
 
-        const nextNode = getNextNode();
+        const nextNode = getNextNode(currentNodeId);
         if (nextNode) {
+            setCurrentNodeId(nextNode.id);
             if (nextNode.type === 'openAINode') {
                 setLoading(true);
-                nextNode.data.userMessage = userInput;
-                nextNode.data.triggerExecution = true;
-                setCurrentNodeId(nextNode.id);
-            } else {
+                const response = await executeOpenAINode(nextNode.data, userInput);
+                setChatMessages(prev => [...prev, { type: 'agent', text: response }]);
+                setLoading(false);
+            } else if (nextNode.type === 'textInput') {
                 setChatMessages(prev => [...prev, { type: 'agent', text: nextNode.data.label }]);
-                setCurrentNodeId(nextNode.id);
             }
         }
 
@@ -179,12 +217,33 @@ function Flow() {
 
     const restartChat = () => {
         setChatMessages([]);
-        setNodes(initialNodes);
-        setEdges([]);
-        setCurrentNodeId('start');
-        localStorage.removeItem('nodes');
-        localStorage.removeItem('edges');
+        const firstNode = nodes.find(node => node.id === 'start') || nodes[0];
+        if (firstNode) {
+            setCurrentNodeId(firstNode.id);
+            if (firstNode.type === 'textInput') {
+                setChatMessages([{ type: 'agent', text: firstNode.data.label }]);
+            }
+            else if (firstNode.type === 'openAINode') {
+                updateNodeData(firstNode.id, 'triggerExecution', true);
+            }
+        }
     };
+
+    useEffect(() => {
+        if (nodes.length > 0 && chatMessages.length === 0) {
+            initializeChat();
+        }
+    }, [nodes, chatMessages, initializeChat]);
+
+    useEffect(() => {
+        if (nodes.length > 0 && chatMessages.length === 0) {
+            const firstNode = nodes[0];
+            setCurrentNodeId(firstNode.id);
+            if (firstNode.type === 'textInput') {
+                setChatMessages([{ type: 'agent', text: firstNode.data.label }]);
+            }
+        }
+    }, []);
 
     useEffect(() => {
         if (chatMessagesRef.current) {

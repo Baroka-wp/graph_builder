@@ -8,14 +8,13 @@ const TextInputNode = ({ data, isConnectable }) => {
       ...neumorphicStyle,
       padding: '15px', 
       minWidth: '150px',
-      maxWidth: '300px',
-      wordWrap: 'break-word',
+      maxWidth: '300px'
     }}>
       <Handle type="target" position={Position.Top} isConnectable={isConnectable} />
       <div style={{ marginBottom: '10px', fontWeight: 'bold', color: '#3498db' }}>Text Input</div>
       <textarea
         value={data.label}
-        onChange={(evt) => data.onChange(evt.target.value)}
+        onChange={(evt) => data.onLabelChange(evt.target.value)}
         style={{
           width: '100%',
           border: 'none',
